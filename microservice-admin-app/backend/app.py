@@ -3,10 +3,71 @@ from flask_cors import CORS
 import mysql.connector
 import os
 import time
+import jwt
+import datetime
+from functools import wraps
 
 app = Flask(__name__)
 # Configure CORS to allow requests from frontend
 CORS(app, origins=["http://localhost:8080", "http://127.0.0.1:8080", "http://frontend:80"])
+
+# Secret key for JWT tokens
+app.config['SECRET_KEY'] = 'your-secret-key-here-change-in-production'
+
+# Active sessions storage (in production, use Redis or database)
+active_sessions = {
+    'user_sessions': {},
+    'admin_sessions': {}
+}
+
+# JWT token generation
+def generate_token(user_type, username):
+    payload = {
+        'user_type': user_type,
+        'username': username,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    }
+    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+# JWT token validation decorator
+def token_required(user_type):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            token = request.headers.get('Authorization')
+            if not token:
+                return jsonify({'message': 'Token is missing!'}), 401
+            
+            try:
+                if token.startswith('Bearer '):
+                    token = token[7:]
+                
+                data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+                
+                # Check if token type matches required type
+                if data['user_type'] != user_type:
+                    return jsonify({'message': 'Invalid token type!'}), 401
+                
+                # Check if session is still active
+                session_key = f"{data['username']}_{data['user_type']}"
+                if user_type == 'admin':
+                    if session_key not in active_sessions['admin_sessions']:
+                        return jsonify({'message': 'Session expired!'}), 401
+                else:
+                    if session_key not in active_sessions['user_sessions']:
+                        return jsonify({'message': 'Session expired!'}), 401
+                
+                request.current_user = data['username']
+                request.user_type = data['user_type']
+                
+            except jwt.ExpiredSignatureError:
+                return jsonify({'message': 'Token has expired!'}), 401
+            except jwt.InvalidTokenError:
+                return jsonify({'message': 'Token is invalid!'}), 401
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 # Function to connect to MySQL database with retries
 def connect_to_database():
@@ -65,7 +126,22 @@ def login():
         cursor.execute("SELECT * FROM users WHERE username=%s AND password=%s", (data['username'], data['password']))
         user = cursor.fetchone()
         if user:
-            return jsonify({"message": "Login successful"})
+            # Generate token
+            token = generate_token('user', data['username'])
+            
+            # Store session
+            session_key = f"{data['username']}_user"
+            active_sessions['user_sessions'][session_key] = {
+                'username': data['username'],
+                'login_time': datetime.datetime.utcnow(),
+                'token': token
+            }
+            
+            return jsonify({
+                "message": "Login successful",
+                "token": token,
+                "username": data['username']
+            })
         else:
             return jsonify({"message": "Invalid credentials"}), 401
     except Exception as e:
@@ -76,11 +152,27 @@ def login():
 def admin_login():
     data = request.get_json()
     if data['username'] == 'admin' and data['password'] == 'admin123':
-        return jsonify({"message": "Admin Login successful"})
+        # Generate admin token
+        token = generate_token('admin', 'admin')
+        
+        # Store admin session
+        session_key = "admin_admin"
+        active_sessions['admin_sessions'][session_key] = {
+            'username': 'admin',
+            'login_time': datetime.datetime.utcnow(),
+            'token': token
+        }
+        
+        return jsonify({
+            "message": "Admin Login successful",
+            "token": token,
+            "username": "admin"
+        })
     else:
         return jsonify({"message": "Unauthorized"}), 401
 
 @app.route('/users', methods=['GET'])
+@token_required('admin')
 def get_users():
     try:
         db, cursor = get_db_connection()
@@ -90,6 +182,87 @@ def get_users():
     except Exception as e:
         print(f"Get users error: {e}")
         return jsonify({"message": "Failed to fetch users"}), 500
+
+@app.route('/user-dashboard', methods=['GET'])
+@token_required('user')
+def user_dashboard():
+    return jsonify({
+        "message": "Welcome to user dashboard",
+        "username": request.current_user
+    })
+
+@app.route('/admin-dashboard', methods=['GET'])
+@token_required('admin')
+def admin_dashboard():
+    try:
+        db, cursor = get_db_connection()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+        
+        return jsonify({
+            "message": "Welcome to admin dashboard",
+            "user_count": user_count,
+            "admin": request.current_user
+        })
+    except Exception as e:
+        print(f"Admin dashboard error: {e}")
+        return jsonify({"message": "Dashboard error"}), 500
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    token = request.headers.get('Authorization')
+    if not token:
+        return jsonify({'message': 'No token provided'}), 400
+    
+    try:
+        if token.startswith('Bearer '):
+            token = token[7:]
+        
+        data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        session_key = f"{data['username']}_{data['user_type']}"
+        
+        # Remove session
+        if data['user_type'] == 'admin':
+            active_sessions['admin_sessions'].pop(session_key, None)
+        else:
+            active_sessions['user_sessions'].pop(session_key, None)
+        
+        return jsonify({'message': 'Logout successful'})
+    except jwt.InvalidTokenError:
+        return jsonify({'message': 'Invalid token'}), 400
+
+@app.route('/verify-session', methods=['GET'])
+def verify_session():
+    token = request.headers.get('Authorization')
+    if not token:
+        return jsonify({'valid': False, 'message': 'No token provided'}), 401
+    
+    try:
+        if token.startswith('Bearer '):
+            token = token[7:]
+        
+        data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        session_key = f"{data['username']}_{data['user_type']}"
+        
+        # Check if session exists
+        if data['user_type'] == 'admin':
+            session_exists = session_key in active_sessions['admin_sessions']
+        else:
+            session_exists = session_key in active_sessions['user_sessions']
+        
+        if session_exists:
+            return jsonify({
+                'valid': True,
+                'username': data['username'],
+                'user_type': data['user_type']
+            })
+        else:
+            return jsonify({'valid': False, 'message': 'Session expired'}), 401
+            
+    except jwt.ExpiredSignatureError:
+        return jsonify({'valid': False, 'message': 'Token expired'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'valid': False, 'message': 'Invalid token'}), 401
 
 @app.route('/health', methods=['GET'])
 def health_check():

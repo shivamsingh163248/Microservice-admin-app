@@ -1,5 +1,6 @@
 #!/bin/bash
 
+cd microservice-admin-app
 
 echo "📦 Building Docker images..."
 docker-compose build
