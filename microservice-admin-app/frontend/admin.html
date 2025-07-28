@@ -3,24 +3,41 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>Admin Panel</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h2>Admin Panel</h2>
-<ul id="userList"></ul>
-<script>
-  fetch("http://backend:5000/users")
-    .then(res => res.json())
-    .then(users => {
-      const list = document.getElementById("userList");
-      users.forEach(user => {
-        const li = document.createElement("li");
-        li.innerText = user;
-        list.appendChild(li);
-      });
-    });
-</script>
+    <div class="container">
+        <h2>Admin Panel</h2>
+        <h3>Registered Users:</h3>
+        <ul id="userList"></ul>
+        
+        <div class="links">
+            <a href="admin-login.html">Back to Admin Login</a>
+            <a href="index.html">User Login</a>
+        </div>
+    </div>
 
-    
+    <script>
+        // Determine the backend URL based on environment
+        const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? 
+            'http://localhost:5000' : 
+            `http://${window.location.hostname}:5000`;
+        
+        fetch(`${API_BASE_URL}/users`)
+            .then(res => res.json())
+            .then(users => {
+                const list = document.getElementById("userList");
+                users.forEach(user => {
+                    const li = document.createElement("li");
+                    li.innerText = user;
+                    list.appendChild(li);
+                });
+            })
+            .catch(error => {
+                console.error('Error fetching users:', error);
+                document.getElementById("userList").innerHTML = '<li>Error loading users</li>';
+            });
+    </script>
 </body>
 </html>
